@@ -1,0 +1,22 @@
+[Unit]
+Description=Dimonova print agent (print_jobs -> ESC/POS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=printagent
+Group=printagent
+WorkingDirectory=/opt/print-agent
+EnvironmentFile=/opt/print-agent/.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning /opt/print-agent/dist/index.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/print-agent/data
+
+[Install]
+WantedBy=multi-user.target
