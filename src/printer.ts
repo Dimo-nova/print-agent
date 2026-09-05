@@ -5,6 +5,9 @@ export interface PrinterTarget {
   port: number
 }
 
+/** Inyectable en tests: un socket que nunca conecta hace saltar el timeout de forma determinista. */
+export type Connect = (options: { host: string; port: number }) => net.Socket
+
 /**
  * Abrir, escribir, cerrar. Nunca se deja el socket abierto: las impresoras
  * confirmadas admiten UNA conexión y el TPV del local imprime contra la misma.
@@ -12,10 +15,10 @@ export interface PrinterTarget {
  * (`ECONNREFUSED 192.168.1.6:9100`, `timeout 5000ms 192.168.1.6:9100`) que va
  * tal cual a `print_jobs.error`.
  */
-export function sendBytes(target: PrinterTarget, bytes: Uint8Array, timeoutMs: number): Promise<void> {
+export function sendBytes(target: PrinterTarget, bytes: Uint8Array, timeoutMs: number, connect: Connect = net.createConnection): Promise<void> {
   const where = `${target.host}:${target.port}`
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: target.host, port: target.port })
+    const socket = connect({ host: target.host, port: target.port })
     let settled = false
     const fail = (err: Error) => {
       if (settled) return
@@ -38,9 +41,9 @@ export function sendBytes(target: PrinterTarget, bytes: Uint8Array, timeoutMs: n
 }
 
 /** ¿Acepta conexiones? Para el heartbeat de `printers.last_seen_at`. */
-export function probe(target: PrinterTarget, timeoutMs: number): Promise<boolean> {
+export function probe(target: PrinterTarget, timeoutMs: number, connect: Connect = net.createConnection): Promise<boolean> {
   return new Promise(resolve => {
-    const socket = net.createConnection({ host: target.host, port: target.port })
+    const socket = connect({ host: target.host, port: target.port })
     let settled = false
     const done = (ok: boolean) => {
       if (settled) return

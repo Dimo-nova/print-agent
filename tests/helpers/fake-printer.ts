@@ -2,10 +2,9 @@ import net from 'node:net'
 
 /**
  * Impresora ESC/POS de mentira: acepta en un puerto efímero, acumula bytes por
- * conexión y cierra cuando el cliente cierra. Con `swallow` acepta y no
- * responde ni cierra: sirve para provocar el timeout del agente.
+ * conexión y cierra cuando el cliente cierra.
  */
-export async function startFakePrinter(opts: { swallow?: boolean } = {}) {
+export async function startFakePrinter() {
   const received: Buffer[] = []
   const sockets = new Set<net.Socket>()
   let connections = 0
@@ -15,7 +14,6 @@ export async function startFakePrinter(opts: { swallow?: boolean } = {}) {
     const chunks: Buffer[] = []
     socket.on('data', c => chunks.push(c))
     socket.on('close', () => { sockets.delete(socket); if (chunks.length) received.push(Buffer.concat(chunks)) })
-    if (opts.swallow) socket.pause()
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const port = (server.address() as net.AddressInfo).port

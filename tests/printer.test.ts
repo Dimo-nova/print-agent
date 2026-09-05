@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import net from 'node:net'
-import { sendBytes, probe } from '../src/printer.js'
+import { sendBytes, probe, type Connect } from '../src/printer.js'
 import { startFakePrinter } from './helpers/fake-printer.js'
 
 const bytes = Uint8Array.from([0x1b, 0x40, 0x48, 0x4f, 0x4c, 0x41, 0x0a, 0x1d, 0x56, 0x42, 0x00])
@@ -21,13 +21,12 @@ describe('sendBytes', () => {
     await expect(sendBytes({ host: '127.0.0.1', port: free }, bytes, 2_000)).rejects.toThrow(/ECONNREFUSED 127\.0\.0\.1:\d+/)
   })
 
-  it('impresora que acepta pero no lee: timeout', async () => {
-    const printer = await startFakePrinter({ swallow: true })
-    // Un payload grande no cabe en el buffer del kernel de golpe, así que el
-    // flush nunca termina y salta el timeout.
-    const big = new Uint8Array(32 * 1024 * 1024)
-    await expect(sendBytes({ host: '127.0.0.1', port: printer.port }, big, 500)).rejects.toThrow(/timeout 500ms/)
-    await printer.close()
+  it('sin respuesta del host: timeout', async () => {
+    // Un socket creado pero nunca conectado: ni 'connect' ni 'error' llegan,
+    // solo puede salvarnos el timeout. Es lo que pasa con una impresora
+    // apagada cuya IP sigue en la tabla ARP: los SYN se pierden en silencio.
+    const never: Connect = () => new net.Socket()
+    await expect(sendBytes({ host: '10.0.0.1', port: 9100 }, bytes, 300, never)).rejects.toThrow(/timeout 300ms 10\.0\.0\.1:9100/)
   })
 })
 
@@ -37,6 +36,11 @@ describe('probe', () => {
     expect(await probe({ host: '127.0.0.1', port: printer.port }, 1_000)).toBe(true)
     await printer.close()
     expect(await probe({ host: '127.0.0.1', port: printer.port }, 1_000)).toBe(false)
+  })
+
+  it('sin respuesta del host: false por timeout', async () => {
+    const never: Connect = () => new net.Socket()
+    expect(await probe({ host: '10.0.0.1', port: 9100 }, 300, never)).toBe(false)
   })
 })
 
