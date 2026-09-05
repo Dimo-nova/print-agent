@@ -32,7 +32,7 @@ Estado verificado 2026-09-05 contra la BD real con el JWT del agente de Le Club:
 ## Contrato con Supabase (copia literal del spec de la cola, es lo que se implementa)
 
 1. `signInWithPassword(email, password)` con la clave publishable. `autoRefreshToken: true`, `persistSession: false`. `onAuthStateChange` → `realtime.setAuth(token)` en cada cambio.
-2. `select id, name, target, host, port, code_page, columns, features from printers where active` al arrancar y en cada evento `printers` (INSERT/UPDATE/DELETE, filtro `restaurant_id=eq.X`).
+2. `select id, name, target, host, port from printers where active` (el agente no renderiza: `code_page`, `columns` y `features` no le hacen falta) al arrancar y en cada evento `printers` (INSERT/UPDATE/DELETE, filtro `restaurant_id=eq.X`).
 3. Suscripción `postgres_changes` INSERT en `print_jobs`, filtro `restaurant_id=eq.X`. Al evento y cada 60 s: `select id, printer_id, target, status, attempts, claimed_at from print_jobs where restaurant_id = X and (status = 'queued' or (status = 'claimed' and claimed_at < <ahora_servidor − 2 min>)) order by created_at` (`.or('status.eq.queued,and(status.eq.claimed,claimed_at.lt.<iso>)')`). **Sin `payload`.**
 4. Por fila: `update set status='claimed', claimed_at=<ahora_servidor>, attempts=<attempts leído + 1> where id=… and status in ('queued','claimed')` con `.select('id')`. Cero filas = no es mío o alguien lo cogió, saltar. Luego `select payload where id=…`, socket, y `delivered` / `queued` (release) / `failed`, siempre con `.select('id')`.
 5. Cada 30 s: `update print_agents set last_seen_at=<ahora>, version=<package.json version> where id=<mi id>` y, por impresora activa, `connect` + `end` al `host:port` con timeout 3 s → `update printers set last_seen_at=<ahora> where id=…`. Si el probe falla, no se toca `last_seen_at`: el panel lo pinta gris.
@@ -106,7 +106,7 @@ export class Ledger {
 }
 ```
 
-`node:sqlite` `DatabaseSync`, `PRAGMA journal_mode = WAL`. Tabla `printed(job_id text primary key, printed_at text not null)`.
+`node:sqlite` `DatabaseSync`, `PRAGMA journal_mode = WAL` (los ficheros `-wal`/`-shm` viven junto al `.sqlite`, dentro de `data/`, que es lo único que systemd deja escribir). `node:sqlite` emite `ExperimentalWarning` en Node 22: el `.service` arranca con `--disable-warning=ExperimentalWarning`. Tabla `printed(job_id text primary key, printed_at text not null)`.
 
 ### `printer.ts`
 
@@ -206,7 +206,7 @@ Type=simple
 User=printagent
 WorkingDirectory=/opt/print-agent
 EnvironmentFile=/opt/print-agent/.env
-ExecStart=/usr/bin/node /opt/print-agent/dist/index.js
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning /opt/print-agent/dist/index.js
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
