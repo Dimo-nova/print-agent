@@ -47,10 +47,24 @@ export async function connect(
   }
   log('supabase', 'signed in', { email: cfg.agentEmail })
 
-  // Patrón del KDS: cada rotación de token (más o menos cada hora) se
-  // reenvía al socket de Realtime, o la suscripción muere en silencio.
-  client.auth.onAuthStateChange((_event, session) => {
-    if (session?.access_token) client.realtime.setAuth(session.access_token)
+  // Rotación de token: supabase-js ya reenvía el JWT a Realtime por su cuenta,
+  // esto es cinturón y tirantes. Lo que NO hace solo es volver a entrar si la
+  // sesión se pierde (contraseña regenerada, refresh rechazado): a partir de
+  // ahí las consultas irían como anon, RLS devolvería cero filas y el agente
+  // parecería sano sin imprimir nada. Salir con 1 deja que systemd reinicie
+  // y connect() vuelva a hacer login con el .env.
+  client.auth.onAuthStateChange((event, session) => {
+    if (session?.access_token) {
+      client.realtime.setAuth(session.access_token)
+      return
+    }
+    // La versión instalada de @supabase/auth-js no tipa 'USER_DELETED' en
+    // AuthChangeEvent (solo 'SIGNED_OUT' existe en el enum), pero por si una
+    // versión futura la emite se comprueba igual con un cast defensivo.
+    if (event === 'SIGNED_OUT' || (event as string) === 'USER_DELETED') {
+      logError('supabase', `session lost (${event}), exiting so systemd restarts and re-logs in`)
+      process.exit(1)
+    }
   })
   const { data: { session } } = await client.auth.getSession()
   if (session?.access_token) client.realtime.setAuth(session.access_token)

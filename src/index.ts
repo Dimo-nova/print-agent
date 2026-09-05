@@ -34,9 +34,17 @@ async function main(): Promise<void> {
 
   const workers = new Map<string, PrinterWorker>()
   const syncWorkers = () => {
-    const wanted = new Set(printers.all().map(p => p.id))
+    const printersMap = new Map(printers.all().map(p => [p.id, p]))
+    // El remedio del panel para una impresora gris es editar su IP: eso tiene
+    // que llegar al worker vivo sin reiniciar el proceso, así que un cambio de
+    // host/puerto se trata igual que si la impresora hubiera desaparecido.
     for (const [id, worker] of workers) {
-      if (!wanted.has(id)) { worker.stop(); workers.delete(id); log('main', 'worker stopped', { printer: worker.printer.name }) }
+      const row = printersMap.get(id)
+      if (!row || row.host !== worker.printer.host || row.port !== worker.printer.port) {
+        worker.stop()
+        workers.delete(id)
+        log('main', 'worker stopped', { printer: worker.printer.name, reason: row ? 'endpoint changed' : 'printer gone' })
+      }
     }
     for (const printer of printers.all()) {
       if (!workers.has(printer.id)) {
@@ -78,6 +86,9 @@ async function main(): Promise<void> {
       skippedNoPrinter.add(job.id)
       log('poll', 'no active printer for job, left in queue', { job: job.id, printer_id: job.printer_id })
     }
+    // Tope de memoria: en el peor caso esto repite una línea de log una vez
+    // cada 1000 huérfanos, que es un precio aceptable por no crecer sin fin.
+    if (skippedNoPrinter.size > 1000) skippedNoPrinter.clear()
   }
 
   const jobsChannel: RealtimeChannel = client
@@ -92,15 +103,20 @@ async function main(): Promise<void> {
 
   await poll('startup')
   const pollTimer = setInterval(() => void poll('interval'), cfg.pollIntervalMs)
+  const pruneTimer = setInterval(() => ledger.prune(), 24 * 60 * 60 * 1000)
   const stopHeartbeat = startHeartbeat({
     client, agentId: agent.id, printers, clock, version,
     heartbeatMs: cfg.heartbeatMs, probeTimeoutMs: cfg.probeTimeoutMs,
   })
   log('main', 'running', { restaurant: restaurantId, pollMs: cfg.pollIntervalMs, heartbeatMs: cfg.heartbeatMs })
 
+  let closing = false
   const shutdown = async (signal: string) => {
+    if (closing) return
+    closing = true
     log('main', 'shutting down', { signal })
     clearInterval(pollTimer)
+    clearInterval(pruneTimer)
     stopHeartbeat()
     for (const worker of workers.values()) worker.stop()
     await client.removeChannel(jobsChannel)

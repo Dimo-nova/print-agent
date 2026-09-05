@@ -44,4 +44,14 @@ describe('Ledger', () => {
     expect(second.wasPrinted('recent')).toBe(true)
     second.close()
   })
+
+  it('prune borra lo mas viejo que la retencion sin reabrir', () => {
+    const ledger = new Ledger(tmpPath(), 7)
+    ledger.markPrinted('old', new Date(Date.now() - 8 * 86_400_000))
+    ledger.markPrinted('recent', new Date())
+    ledger.prune()
+    expect(ledger.wasPrinted('old')).toBe(false)
+    expect(ledger.wasPrinted('recent')).toBe(true)
+    ledger.close()
+  })
 })

@@ -21,34 +21,40 @@ export interface HeartbeatDeps {
  */
 export function startHeartbeat(deps: HeartbeatDeps): () => void {
   let stopped = false
+  let running = false
 
   const tick = async () => {
-    if (stopped) return
-    const now = deps.clock.now().toISOString()
+    if (stopped || running) return
+    running = true
     try {
-      const { data, error } = await deps.client
-        .from('print_agents')
-        .update({ last_seen_at: now, version: deps.version })
-        .eq('id', deps.agentId)
-        .select('id')
-      if (error) throw error
-      if ((data ?? []).length !== 1) log('heartbeat', 'agent update rejected (deactivated?)')
-    } catch (err) {
-      logError('heartbeat', 'agent heartbeat failed', err)
-    }
-
-    for (const printer of deps.printers.all()) {
-      const alive = await probe({ host: printer.host, port: printer.port }, deps.probeTimeoutMs)
-      if (!alive) {
-        log('heartbeat', 'printer unreachable', { printer: printer.name, host: `${printer.host}:${printer.port}` })
-        continue
-      }
+      const now = deps.clock.now().toISOString()
       try {
-        const { error } = await deps.client.from('printers').update({ last_seen_at: now }).eq('id', printer.id).select('id')
+        const { data, error } = await deps.client
+          .from('print_agents')
+          .update({ last_seen_at: now, version: deps.version })
+          .eq('id', deps.agentId)
+          .select('id')
         if (error) throw error
+        if ((data ?? []).length !== 1) log('heartbeat', 'agent update rejected (deactivated?)')
       } catch (err) {
-        logError('heartbeat', `printer heartbeat failed printer=${printer.name}`, err)
+        logError('heartbeat', 'agent heartbeat failed', err)
       }
+
+      for (const printer of deps.printers.all()) {
+        const alive = await probe({ host: printer.host, port: printer.port }, deps.probeTimeoutMs)
+        if (!alive) {
+          log('heartbeat', 'printer unreachable', { printer: printer.name, host: `${printer.host}:${printer.port}` })
+          continue
+        }
+        try {
+          const { error } = await deps.client.from('printers').update({ last_seen_at: now }).eq('id', printer.id).select('id')
+          if (error) throw error
+        } catch (err) {
+          logError('heartbeat', `printer heartbeat failed printer=${printer.name}`, err)
+        }
+      }
+    } finally {
+      running = false
     }
   }
 

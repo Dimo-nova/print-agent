@@ -13,13 +13,22 @@ import { dirname } from 'node:path'
  */
 export class Ledger {
   private readonly db: DatabaseSync
+  private readonly retentionDays: number
 
   constructor(path: string, retentionDays = 7) {
+    this.retentionDays = retentionDays
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('CREATE TABLE IF NOT EXISTS printed (job_id TEXT PRIMARY KEY, printed_at TEXT NOT NULL)')
-    const cutoff = new Date(Date.now() - retentionDays * 86_400_000).toISOString()
+    this.prune()
+  }
+
+  /** Borra lo más viejo que la retención. Se llama al abrir y periódicamente
+   * desde index.ts, para que un proceso de larga duración no acumule filas
+   * para siempre entre reinicios. */
+  prune(): void {
+    const cutoff = new Date(Date.now() - this.retentionDays * 86_400_000).toISOString()
     this.db.prepare('DELETE FROM printed WHERE printed_at < ?').run(cutoff)
   }
 
