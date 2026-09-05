@@ -102,6 +102,7 @@ describe('PrinterWorker', () => {
     await w.drain()
     await new Promise(r => setTimeout(r, 50))
     expect(fake.received).toHaveLength(1)
+    expect(patches()).toHaveLength(2)
   })
 
   it('error de Supabase a mitad: deja el job y duerme 10 s', async () => {
@@ -111,5 +112,42 @@ describe('PrinterWorker', () => {
     await w.drain()
     expect(fake.connections).toBe(0)
     expect(slept).toEqual([10_000])
+  })
+
+  it('Supabase falla despues de imprimir: no reimprime al reintentar', async () => {
+    // Primer pase: todo bien salvo el PATCH delivered, que da 500. Segundo pase
+    // (el poll reofrece el job): el libro dice impreso, delivered sin socket.
+    let deliveredFails = true
+    pg.onRequest(req => {
+      if (req.method === 'PATCH' && (req.body as { status?: string }).status === 'delivered' && deliveredFails) {
+        return { status: 500, body: { message: 'db down' } }
+      }
+      return happyHandler(req)
+    })
+    const w = new PrinterWorker(printer(fake.port), { client, clock, ledger, socketTimeoutMs: 2_000, sleep })
+    w.enqueue(job())
+    await w.drain()
+    expect(ledger.wasPrinted('j1')).toBe(true)
+    expect(slept).toEqual([10_000])
+
+    deliveredFails = false
+    w.enqueue(job(1))
+    await w.drain()
+    await new Promise(r => setTimeout(r, 50))
+    expect(fake.received).toHaveLength(1)
+    expect(patches().map(p => p.status)).toEqual(['claimed', 'delivered', 'claimed', 'delivered'])
+  })
+
+  it('markDelivered rechazado: se loguea y tras tres rechazos deja de reclamar', async () => {
+    pg.onRequest(req => {
+      if (req.method === 'PATCH' && (req.body as { status?: string }).status === 'delivered') return { body: [] }
+      return happyHandler(req)
+    })
+    const w = new PrinterWorker(printer(fake.port), { client, clock, ledger, socketTimeoutMs: 2_000, sleep })
+    for (let i = 0; i < 4; i++) { w.enqueue(job(i)); await w.drain() }
+    await new Promise(r => setTimeout(r, 50))
+    // Tres pases reclaman e intentan delivered; el cuarto ya no reclama.
+    expect(patches().filter(p => p.status === 'claimed')).toHaveLength(3)
+    expect(fake.received).toHaveLength(1) // el libro evita reimprimir en los pases 2 y 3
   })
 })
