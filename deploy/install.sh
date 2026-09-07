@@ -64,10 +64,12 @@ sudo -u "$APP_USER" mkdir -p data
 
 echo "== .env"
 if [ ! -f .env ]; then
-  read -rp "SUPABASE_URL: " SUPABASE_URL
-  read -rp "SUPABASE_PUBLISHABLE_KEY: " SUPABASE_PUBLISHABLE_KEY
-  read -rp "AGENT_EMAIL: " AGENT_EMAIL
-  read -rsp "AGENT_PASSWORD (no se muestra): " AGENT_PASSWORD; echo
+  # Desde /dev/tty: con `curl ... | sudo bash` el stdin es el propio script y
+  # las respuestas serian lineas de codigo (visto al instalar Skybar 2026-09-07).
+  read -rp "SUPABASE_URL: " SUPABASE_URL </dev/tty
+  read -rp "SUPABASE_PUBLISHABLE_KEY: " SUPABASE_PUBLISHABLE_KEY </dev/tty
+  read -rp "AGENT_EMAIL: " AGENT_EMAIL </dev/tty
+  read -rsp "AGENT_PASSWORD (no se muestra): " AGENT_PASSWORD </dev/tty; echo
   umask 077
   cat > .env <<EOF
 SUPABASE_URL=${SUPABASE_URL}
