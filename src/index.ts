@@ -60,7 +60,9 @@ async function main(): Promise<void> {
 
   let polling = false
   let pollAgain = false
-  let lastPollOk = Date.now()
+  // Monotonico a proposito: un salto de NTP al arrancar (RTC muerto, la Pi
+  // nace en 1970) haria saltar al perro guardian con Date.now().
+  let lastPollOk = performance.now()
   const skippedNoPrinter = new Set<string>()
   async function poll(reason: string): Promise<void> {
     if (polling) { pollAgain = true; return }
@@ -78,7 +80,7 @@ async function main(): Promise<void> {
       do {
         pollAgain = false
         const jobs = await fetchClaimable(client, restaurantId, clock, cfg.staleClaimMs)
-        lastPollOk = Date.now()
+        lastPollOk = performance.now()
         if (jobs.length > 0) log('poll', 'claimable', { reason, n: jobs.length })
         for (const job of jobs) await dispatch(job)
       } while (pollAgain)
@@ -122,7 +124,7 @@ async function main(): Promise<void> {
   // ve el agente en verde por el heartbeat y las comandas no salen. Salir con
   // 1 hace que systemd lo reinicie a los 5 s y que el fallo quede en el log.
   const watchdogTimer = setInterval(() => {
-    if (Date.now() - lastPollOk > 10 * 60_000) {
+    if (performance.now() - lastPollOk > 10 * 60_000) {
       logError('main', 'no successful poll in 10 min, exiting so systemd restarts')
       process.exit(1)
     }
