@@ -5,7 +5,7 @@ import { Ledger } from '../src/ledger.js'
 import { PrinterWorker, type PrinterRow } from '../src/worker.js'
 import type { ClaimableJob } from '../src/queue.js'
 import { startFakePostgrest, type Recorded } from './helpers/fake-postgrest.js'
-import { startFakePrinter } from './helpers/fake-printer.js'
+import { startFakePrinter, startFakePrinterOn } from './helpers/fake-printer.js'
 import { waitFor } from './helpers/wait-for.js'
 
 let pg: Awaited<ReturnType<typeof startFakePostgrest>>
@@ -112,6 +112,37 @@ describe('PrinterWorker', () => {
     await w.drain()
     expect(slept.length).toBeGreaterThanOrEqual(1)
     expect(sleptSeconds()[0]).toBe(5)
+    expect(patches().filter(p => p.status === 'claimed')).toHaveLength(2)
+  })
+
+  it('wake() cancela el backoff pendiente', async () => {
+    // La impresora falla, se libera con backoff (5 s: pausedUntil queda ~5 s
+    // en el futuro). La impresora vuelve a responder en el MISMO puerto y
+    // wake() debe poner pausedUntil a 0 para que el siguiente job se procese
+    // sin esperar ningún escalón extra -- es justo lo que hace el heartbeat
+    // en producción en cuanto su probe() ve la impresora otra vez arriba.
+    // Con el sleep inyectado no hay temporizador real que cancelar (eso lo
+    // cubre pendingWake en produccion via defaultSleep); lo que se comprueba
+    // aqui es la otra mitad de wake(): sin ella, encolar job(1) mientras
+    // pausedUntil sigue en el futuro dormiria un escalon completo de mas
+    // antes de reclamar, exactamente el caso que "el backoff frena un job
+    // reofrecido por el poll" (arriba) verifica que SI debe pasar sin wake().
+    pg.onRequest(happyHandler)
+    const port = fake.port
+    await fake.close()
+    const w = new PrinterWorker(printer(port), { client, clock, ledger, socketTimeoutMs: 1_000, staleClaimMs: 120_000, sleep })
+    w.enqueue(job(0))
+    await w.drain()
+    expect(sleptSeconds()).toEqual([5])
+    const sleptBeforeWake = slept.length
+
+    fake = await startFakePrinterOn(port)
+    w.wake()
+    w.enqueue(job(1))
+    await w.drain()
+
+    await waitFor(() => fake.received.length === 1)
+    expect(slept.length).toBe(sleptBeforeWake)
     expect(patches().filter(p => p.status === 'claimed')).toHaveLength(2)
   })
 

@@ -71,6 +71,16 @@ export class PrinterWorker {
     this.pendingWake?.()
   }
 
+  /**
+   * Corta el backoff en curso: lo llama el heartbeat en cuanto su `probe()`
+   * ve que la impresora vuelve a aceptar conexiones, para no esperar el resto
+   * de un escalón de hasta 60 s cuando ya se sabe que va a funcionar.
+   */
+  wake(): void {
+    this.pausedUntil = 0
+    this.pendingWake?.()
+  }
+
   /** Para tests: espera a que la cola esté vacía y el bucle parado. */
   async drain(): Promise<void> {
     while (this.running || this.queue.size > 0) await new Promise(resolve => setTimeout(resolve, 5))

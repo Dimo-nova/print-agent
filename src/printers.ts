@@ -1,4 +1,4 @@
-import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js'
+import type { RealtimeChannel, RealtimePostgresChangesPayload, SupabaseClient } from '@supabase/supabase-js'
 import type { PrinterRow } from './worker.js'
 import { log, logError } from './log.js'
 
@@ -49,7 +49,12 @@ export class PrinterCache {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'printers', filter: `restaurant_id=eq.${this.restaurantId}` },
-        () => {
+        (payload: RealtimePostgresChangesPayload<Record<string, unknown>>) => {
+          // El propio heartbeat hace un UPDATE de last_seen_at cada
+          // heartbeatMs: eso no es un cambio que le importe al agente y no
+          // debe recargar la caché ni disparar un poll (era ruido y dos
+          // peticiones extra por heartbeat).
+          if (payload.eventType === 'UPDATE' && !printerRowChanged(payload.old, payload.new)) return
           this.load().then(onChange).catch(err => logError('printers', 'reload failed', err))
         },
       )
@@ -71,6 +76,22 @@ export class PrinterCache {
     await this.unsubscribe()
     this.subscribe(onChange)
   }
+}
+
+const WATCHED_FIELDS = ['name', 'target', 'host', 'port', 'active'] as const
+
+/**
+ * ¿Cambió algo que le importe al agente? Compara solo las columnas que
+ * afectan al enrutado de comandas; `last_seen_at`/`updated_at` (lo único que
+ * toca nuestro propio heartbeat) se ignoran a propósito. Sin fila anterior
+ * (INSERT, o un UPDATE sin REPLICA IDENTITY FULL) se trata como cambio.
+ */
+export function printerRowChanged(
+  oldRow: Record<string, unknown> | null | undefined,
+  newRow: Record<string, unknown>,
+): boolean {
+  if (!oldRow) return true
+  return WATCHED_FIELDS.some(field => oldRow[field] !== newRow[field])
 }
 
 /** Mismo conjunto de impresoras y mismo endpoint en cada una. */
