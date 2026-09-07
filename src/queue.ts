@@ -38,13 +38,23 @@ export async function fetchClaimable(
   return (data ?? []) as ClaimableJob[]
 }
 
-export async function claim(client: SupabaseClient, job: ClaimableJob, clock: ServerClock): Promise<boolean> {
-  const { data, error } = await client
+export async function claim(
+  client: SupabaseClient,
+  job: ClaimableJob,
+  clock: ServerClock,
+  staleClaimMs: number,
+): Promise<boolean> {
+  let query = client
     .from('print_jobs')
     .update({ status: 'claimed', claimed_at: clock.now().toISOString(), attempts: job.attempts + 1 })
     .eq('id', job.id)
-    .in('status', ['queued', 'claimed'])
-    .select('id')
+  // CAS sobre lo que vio el poll: un queued solo se reclama si sigue queued;
+  // un claimed solo si sigue abandonado (claimed_at anterior al umbral). Así
+  // dos procesos con las mismas credenciales no imprimen los dos.
+  query = job.status === 'queued'
+    ? query.eq('status', 'queued')
+    : query.eq('status', 'claimed').lt('claimed_at', new Date(clock.now().getTime() - staleClaimMs).toISOString())
+  const { data, error } = await query.select('id')
   if (error) throw new Error(`claim ${job.id}: ${error.message}`)
   return (data ?? []).length === 1
 }

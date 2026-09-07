@@ -12,6 +12,7 @@ export type { PrinterRow } from './worker.js'
 export class PrinterCache {
   private rows = new Map<string, PrinterRow>()
   private channel: RealtimeChannel | null = null
+  private loggedOnce = false
 
   constructor(private readonly client: SupabaseClient, private readonly restaurantId: string) {}
 
@@ -22,8 +23,16 @@ export class PrinterCache {
       .eq('restaurant_id', this.restaurantId)
       .eq('active', true)
     if (error) throw new Error(`printers load: ${error.message}`)
-    this.rows = new Map((data as PrinterRow[]).map(p => [p.id, p]))
-    log('printers', 'loaded', { n: this.rows.size, names: this.all().map(p => p.name).join(',') || '-' })
+    const next = new Map((data as PrinterRow[]).map(p => [p.id, p]))
+    // El poll recarga esta tabla cada minuto (por si se pierde un evento de
+    // Realtime), así que solo se loguea cuando el conjunto cambia de verdad:
+    // si no, el journal serían 1440 líneas idénticas al día.
+    const changed = !this.loggedOnce || !sameSet(this.rows, next)
+    this.rows = next
+    if (changed) {
+      this.loggedOnce = true
+      log('printers', 'loaded', { n: this.rows.size, names: this.all().map(p => p.name).join(',') || '-' })
+    }
   }
 
   get(id: string): PrinterRow | undefined {
@@ -51,4 +60,14 @@ export class PrinterCache {
     if (this.channel) await this.client.removeChannel(this.channel)
     this.channel = null
   }
+}
+
+/** Mismo conjunto de impresoras y mismo endpoint en cada una. */
+function sameSet(a: Map<string, PrinterRow>, b: Map<string, PrinterRow>): boolean {
+  if (a.size !== b.size) return false
+  for (const [id, row] of a) {
+    const other = b.get(id)
+    if (!other || other.host !== row.host || other.port !== row.port) return false
+  }
+  return true
 }

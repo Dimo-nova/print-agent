@@ -35,6 +35,10 @@ export function sendBytes(target: PrinterTarget, bytes: Uint8Array, timeoutMs: n
         if (settled) return
         settled = true
         resolve()
+        // El FIN ya salió; cerrar del todo evita que un socket en FIN_WAIT
+        // ocupe la única conexión que admite la impresora si el otro extremo
+        // tarda en responder al cierre.
+        socket.destroy()
       })
     })
   })

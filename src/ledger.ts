@@ -13,10 +13,10 @@ import { dirname } from 'node:path'
  */
 export class Ledger {
   private readonly db: DatabaseSync
-  private readonly retentionDays: number
+  private readonly keep: number
 
-  constructor(path: string, retentionDays = 7) {
-    this.retentionDays = retentionDays
+  constructor(path: string, keep = 5000) {
+    this.keep = keep
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')
@@ -24,12 +24,19 @@ export class Ledger {
     this.prune()
   }
 
-  /** Borra lo más viejo que la retención. Se llama al abrir y periódicamente
-   * desde index.ts, para que un proceso de larga duración no acumule filas
-   * para siempre entre reinicios. */
+  /**
+   * Deja las últimas `keep` filas y borra el resto. Se llama al abrir y a
+   * diario desde index.ts, para que un proceso de larga duración no acumule
+   * filas para siempre. Por cantidad y no por antigüedad a propósito: el
+   * reloj de la Pi puede estar en 1970 al arrancar, y una retención por
+   * fecha borraría entonces el libro entero justo cuando hace falta (es lo
+   * único que impide reimprimir una comanda ya servida). `printed_at` se
+   * conserva, pero solo para leerlo un humano.
+   */
   prune(): void {
-    const cutoff = new Date(Date.now() - this.retentionDays * 86_400_000).toISOString()
-    this.db.prepare('DELETE FROM printed WHERE printed_at < ?').run(cutoff)
+    this.db
+      .prepare('DELETE FROM printed WHERE rowid NOT IN (SELECT rowid FROM printed ORDER BY rowid DESC LIMIT ?)')
+      .run(this.keep)
   }
 
   markPrinted(jobId: string, at: Date): void {

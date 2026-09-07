@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import net from 'node:net'
 import { sendBytes, probe, type Connect } from '../src/printer.js'
 import { startFakePrinter } from './helpers/fake-printer.js'
+import { waitFor } from './helpers/wait-for.js'
 
 const bytes = Uint8Array.from([0x1b, 0x40, 0x48, 0x4f, 0x4c, 0x41, 0x0a, 0x1d, 0x56, 0x42, 0x00])
 
@@ -9,8 +10,7 @@ describe('sendBytes', () => {
   it('entrega exactamente los bytes y cierra el socket', async () => {
     const printer = await startFakePrinter()
     await sendBytes({ host: '127.0.0.1', port: printer.port }, bytes, 2_000)
-    await new Promise(r => setTimeout(r, 50))
-    expect(printer.received).toHaveLength(1)
+    await waitFor(() => printer.received.length === 1)
     expect(Array.from(printer.received[0]!)).toEqual(Array.from(bytes))
     expect(printer.connections).toBe(1)
     await printer.close()

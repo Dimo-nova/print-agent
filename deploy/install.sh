@@ -18,6 +18,17 @@ echo "== paquetes base"
 apt-get update -qq
 apt-get install -y -qq git curl ca-certificates gnupg
 
+echo "== journald persistente"
+# Sin esto, en Raspberry Pi OS el journal vive en /run y se pierde en cada
+# reinicio: justo el log que hace falta para saber por que se reinicio.
+mkdir -p /var/log/journal /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/50-print-agent.conf <<'CONF'
+[Journal]
+Storage=persistent
+SystemMaxUse=200M
+CONF
+systemctl restart systemd-journald
+
 echo "== Node ${NODE_MAJOR}"
 if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".").map(Number)[0]*1000+process.versions.node.split(".").map(Number)[1]')" -lt "$((NODE_MAJOR * 1000 + 13))" ]; then
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
@@ -72,7 +83,10 @@ chown "$APP_USER:$APP_USER" .env
 echo "== systemd"
 install -m 644 deploy/print-agent.service /etc/systemd/system/print-agent.service
 systemctl daemon-reload
-systemctl enable --now print-agent
+# enable + restart, no `enable --now`: en una reinstalacion sobre un servicio
+# ya arrancado, `--now` no hace nada y la Pi seguiria con el codigo viejo.
+systemctl enable print-agent
+systemctl restart print-agent
 sleep 3
 systemctl --no-pager --lines=0 status print-agent || true
 

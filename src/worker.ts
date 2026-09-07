@@ -19,6 +19,8 @@ export interface WorkerDeps {
   clock: ServerClock
   ledger: Ledger
   socketTimeoutMs: number
+  /** Umbral de un `claimed` abandonado; el claim lo usa como CAS. */
+  staleClaimMs: number
   /** Inyectable para tests. */
   sleep?: (ms: number) => Promise<void>
 }
@@ -39,7 +41,11 @@ export class PrinterWorker {
   private current: string | null = null
   /** Rechazos consecutivos de una transición para un job, para no reclamarlo para siempre. */
   private readonly rejected = new Map<string, number>()
+  /** Jobs a los que ya se renunció: se loguean y se marcan `failed` una sola vez. */
+  private readonly gaveUp = new Set<string>()
   private pendingWake: (() => void) | null = null
+  /** Instante local (ms) hasta el que esta impresora está en backoff. */
+  private pausedUntil = 0
 
   constructor(readonly printer: PrinterRow, private readonly deps: WorkerDeps) {
     this.sleep = deps.sleep ?? (ms => this.defaultSleep(ms))
@@ -75,32 +81,50 @@ export class PrinterWorker {
     this.running = true
     try {
       while (!this.stopped) {
+        // El backoff se respeta ANTES de coger el siguiente trabajo, no
+        // después del anterior: así frena también al job que el poll de 60 s
+        // reofrece. Dormir después solo retrasaba el bucle, y el reoferto
+        // entraba por una cola vacía quemando el intento siguiente al
+        // instante: cinco intentos se agotaban en cuatro minutos.
+        const wait = this.pausedUntil - Date.now()
+        if (wait > 0) await this.sleep(wait)
+        if (this.stopped) break
         const next = this.queue.values().next()
         if (next.done) break
         const job = next.value
         this.queue.delete(job.id)
         this.current = job.id
-        const pauseMs = await this.process(job)
+        await this.process(job)
         this.current = null
-        if (this.stopped) break
-        if (pauseMs > 0) await this.sleep(pauseMs)
       }
     } finally {
       this.running = false
     }
   }
 
-  /** Devuelve los ms a dormir antes del siguiente trabajo de esta impresora. */
+  /**
+   * Procesa un trabajo. Cuando toca esperar, deja la pausa en `pausedUntil`
+   * (es de la impresora, no de este job) y devuelve esos ms solo para el log.
+   */
   private async process(job: ClaimableJob): Promise<number> {
     const { client, clock, ledger } = this.deps
     const scope = 'worker'
     const tag = { job: job.id, printer: this.printer.name }
     try {
       if ((this.rejected.get(job.id) ?? 0) >= 3) {
-        logError(scope, `giving up locally after 3 rejected updates job=${job.id}`)
+        // Una vez por job, no una línea de error por minuto: se deja `failed`
+        // en el servidor para que el trabajo deje de reofrecerse y se vea en
+        // el panel por qué. Si el UPDATE también se rechaza, da igual: aquí
+        // ya no se vuelve a intentar.
+        if (!this.gaveUp.has(job.id)) {
+          this.gaveUp.add(job.id)
+          logError(scope, `giving up locally after 3 rejected updates job=${job.id}`)
+          await markFailed(client, job.id, 'updates rejected 3 times', clock)
+          if (this.gaveUp.size > 1000) this.gaveUp.clear()
+        }
         return 0
       }
-      if (!(await claim(client, job, clock))) {
+      if (!(await claim(client, job, clock, this.deps.staleClaimMs))) {
         log(scope, 'claim rejected, skipping', tag)
         return 0
       }
@@ -128,9 +152,12 @@ export class PrinterWorker {
         const released = await release(client, job.id, message)
         this.recordTransition(job.id, 'release', released)
         const pause = backoffFor(attempt)
+        this.pausedUntil = Date.now() + pause
         log(scope, 'socket error, released', { ...tag, attempt, error: message, backoffMs: pause })
         return pause
       }
+      // El socket ha ido bien: la impresora está viva, se levanta el backoff.
+      this.pausedUntil = 0
 
       // Primero el libro, luego Supabase: si la red cae entre los dos, el
       // reoferto de dentro de 2 min encuentra el job en el libro y no reimprime.
@@ -141,10 +168,14 @@ export class PrinterWorker {
       }
       const delivered = await markDelivered(client, job.id, clock)
       this.recordTransition(job.id, 'delivered', delivered)
-      log(scope, 'delivered', { ...tag, bytes: bytes.length })
+      // Solo si el servidor aceptó la transición: `recordTransition` ya
+      // registra el rechazo, y un «delivered» en el log cuando la fila sigue
+      // en `claimed` es exactamente lo que despista al depurar.
+      if (delivered) log(scope, 'delivered', { ...tag, bytes: bytes.length })
       return 0
     } catch (err) {
       logError(scope, `supabase error, job left for next poll job=${job.id}`, err)
+      this.pausedUntil = Date.now() + SUPABASE_ERROR_PAUSE_MS
       return SUPABASE_ERROR_PAUSE_MS
     }
   }

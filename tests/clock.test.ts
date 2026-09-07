@@ -42,4 +42,17 @@ describe('clockFetch', () => {
     expect(res.status).toBe(200)
     expect(clock.skewMs()).toBe(30_000)
   })
+
+  it('aborta la peticion que se queda colgada', async () => {
+    // Una conexion que muere sin FIN (el NAT del local corta la sesion) deja
+    // el fetch esperando para siempre y con el el poll entero.
+    const clock = new ServerClock()
+    const hanging: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    const started = Date.now()
+    await expect(clockFetch(clock, hanging, 50)('https://example.test/x')).rejects.toThrow()
+    expect(Date.now() - started).toBeLessThan(1_000)
+  })
 })

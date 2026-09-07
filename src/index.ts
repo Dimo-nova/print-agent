@@ -48,7 +48,9 @@ async function main(): Promise<void> {
     }
     for (const printer of printers.all()) {
       if (!workers.has(printer.id)) {
-        workers.set(printer.id, new PrinterWorker(printer, { client, clock, ledger, socketTimeoutMs: cfg.socketTimeoutMs }))
+        workers.set(printer.id, new PrinterWorker(printer, {
+          client, clock, ledger, socketTimeoutMs: cfg.socketTimeoutMs, staleClaimMs: cfg.staleClaimMs,
+        }))
         log('main', 'worker started', { printer: printer.name, host: `${printer.host}:${printer.port}` })
       }
     }
@@ -58,14 +60,25 @@ async function main(): Promise<void> {
 
   let polling = false
   let pollAgain = false
+  let lastPollOk = Date.now()
   const skippedNoPrinter = new Set<string>()
   async function poll(reason: string): Promise<void> {
     if (polling) { pollAgain = true; return }
     polling = true
     try {
+      // Las impresoras se recargan en cada poll, no solo con el evento de
+      // Realtime: si ese evento se pierde (canal caído, sesión rota), una IP
+      // corregida en el panel tardaba en llegar hasta el siguiente reinicio.
+      try {
+        await printers.load()
+        syncWorkers()
+      } catch (err) {
+        logError('poll', 'printers reload failed', err)
+      }
       do {
         pollAgain = false
         const jobs = await fetchClaimable(client, restaurantId, clock, cfg.staleClaimMs)
+        lastPollOk = Date.now()
         if (jobs.length > 0) log('poll', 'claimable', { reason, n: jobs.length })
         for (const job of jobs) await dispatch(job)
       } while (pollAgain)
@@ -104,6 +117,17 @@ async function main(): Promise<void> {
   await poll('startup')
   const pollTimer = setInterval(() => void poll('interval'), cfg.pollIntervalMs)
   const pruneTimer = setInterval(() => ledger.prune(), 24 * 60 * 60 * 1000)
+  // Perro guardián. Un proceso vivo que ya no consulta (sesión que no se
+  // refresca, canal muerto que nadie reabre) es peor que uno caído: el panel
+  // ve el agente en verde por el heartbeat y las comandas no salen. Salir con
+  // 1 hace que systemd lo reinicie a los 5 s y que el fallo quede en el log.
+  const watchdogTimer = setInterval(() => {
+    if (Date.now() - lastPollOk > 10 * 60_000) {
+      logError('main', 'no successful poll in 10 min, exiting so systemd restarts')
+      process.exit(1)
+    }
+  }, 60_000)
+
   const stopHeartbeat = startHeartbeat({
     client, agentId: agent.id, printers, clock, version,
     heartbeatMs: cfg.heartbeatMs, probeTimeoutMs: cfg.probeTimeoutMs,
@@ -117,6 +141,7 @@ async function main(): Promise<void> {
     log('main', 'shutting down', { signal })
     clearInterval(pollTimer)
     clearInterval(pruneTimer)
+    clearInterval(watchdogTimer)
     stopHeartbeat()
     for (const worker of workers.values()) worker.stop()
     await client.removeChannel(jobsChannel)

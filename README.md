@@ -20,9 +20,10 @@ Se suscribe a los INSERT de `print_jobs` por Realtime como un timbre, y cada
 60 segundos consulta igualmente por si algún evento se perdió. Por cada
 trabajo: lo reclama (`claimed`), lee el `payload`, abre un socket a la
 impresora, escribe, cierra, y marca `delivered`. Si la impresora no responde,
-lo suelta (`queued`) y espera 5 s, 15 s, 45 s, 2 min, 5 min; al quinto fallo,
-`failed`. Un trabajo reclamado por una Pi que murió a medias se reofrece solo
-a los 2 minutos.
+lo suelta (`queued`) y espera 5 s, 15 s, 45 s, 2 min y luego 5 min cada vez;
+al décimo fallo, `failed` (unos 35 minutos). Esa espera es de la impresora, no
+del trabajo: frena también a los que reofrece el poll de 60 s. Un trabajo
+reclamado por una Pi que murió a medias se reofrece solo a los 2 minutos.
 
 Guarda en SQLite local qué trabajos ya salieron por papel, para que un corte
 de red entre imprimir y confirmar no acabe en dos comandas. Cada 30 s dice
@@ -47,6 +48,13 @@ connect (`printers.last_seen_at`): el panel pinta los puntos verdes con eso.
    email y contraseña del agente. Al terminar, el servicio está arrancado.
 4. **Tailscale.** `sudo tailscale up`, abrir el enlace, aprobar el nodo. A
    partir de ahí `ssh pi@print-leclub` desde cualquier sitio.
+   **Hora en hora:** `timedatectl` debe decir `NTP service: active`
+   (`systemd-timesyncd` viene activo en Raspberry Pi OS). El agente corrige la
+   deriva con la cabecera `Date` de Supabase para todo lo que compara con el
+   servidor, pero el refresco del token de sesión lo hace supabase-js con el
+   reloj local: con la Pi en 1970 la sesión se cae y deja de imprimir. Si eso
+   pasa, el perro guardián (10 min sin una consulta correcta) sale con código
+   1 y systemd reinicia el proceso.
 5. **Comprobar.** `journalctl -u print-agent -f`. En el panel, el agente del
    restaurante debe estar en verde en menos de un minuto.
 
@@ -69,13 +77,28 @@ Si no conecta, el problema es de red, no del agente.
 |---|---|
 | Panel: agente gris | `journalctl -u print-agent -n 100`. `login failed` → credenciales del `.env`. Sin red → `ping`, cable, Tailscale. `agent is deactivated` → activarlo en el panel. |
 | Panel: impresora gris, agente verde | La Pi no llega a `host:port`. `nc -vz host 9100` desde la Pi. IP cambiada (reservarla en el router), impresora apagada, cable. |
-| Trabajo `failed` | `print_jobs.error` dice por qué (`ECONNREFUSED`, `timeout`). Cinco intentos sin conexión. Arreglar la impresora y reimprimir desde el panel (pendiente) o poner la fila en `queued` a mano. |
+| Trabajo `failed` | `print_jobs.error` dice por qué (`ECONNREFUSED`, `timeout`). Diez intentos sin conexión. Arreglar la impresora y, en el **SQL editor de Supabase** (no vale desde el panel: la política y el trigger lo impiden), `update print_jobs set status='queued', attempts=0, error=null where id='<id>'`. |
 | Trabajo `queued` con `error` | Está en backoff. Se reintenta solo. |
 | Imprime dos veces | No debería: el libro local lo impide. Si pasa, se borró `data/ledger.sqlite` o es otra Pi. |
 | No imprime y el trabajo queda `claimed` | La Pi murió a medias. A los 2 min se reofrece solo. |
 | Tildes raras o `EUR` en vez de `€` | `code_page` de esa impresora en el panel (PC437 no tiene €; PC858 sí). |
 | Corta encima del texto o no corta | Flag `cut` de la impresora en el panel. |
 | `ExperimentalWarning: SQLite` en el log | Normal en Node 22 si se arranca sin `--disable-warning`. El `.service` ya lo lleva. |
+
+## Recuperar un trabajo `failed`
+
+Un trabajo que agotó los diez intentos se queda en `failed` y el agente no lo
+vuelve a mirar. Se revive **desde el SQL editor de Supabase**, no desde el
+panel: la política de RLS solo deja al agente escribir sus transiciones, y el
+trigger de columnas rechaza `failed → queued`.
+
+```sql
+update print_jobs set status='queued', attempts=0, error=null where id='<id>';
+```
+
+Antes de eso, arreglar la impresora: si sigue sin responder, el trabajo repite
+el ciclo entero. `nc -vz <host> 9100` desde la Pi lo dice en un segundo. El
+pedido, mientras tanto, está en el KDS.
 
 ## Desarrollo
 

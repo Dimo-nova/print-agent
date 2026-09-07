@@ -24,10 +24,17 @@ export class ServerClock {
   }
 }
 
-/** `fetch` que alimenta el reloj con cada respuesta. Se le pasa a supabase-js en `global.fetch`. */
-export function clockFetch(clock: ServerClock, base: typeof fetch = fetch): typeof fetch {
+/**
+ * `fetch` que alimenta el reloj con cada respuesta. Se le pasa a supabase-js en
+ * `global.fetch`. Lleva timeout propio: sin él, una conexión que queda a medias
+ * (wifi del local que se va, NAT que corta la sesión sin FIN) deja la petición
+ * colgada para siempre y con ella el `poll()` o el heartbeat, sin un solo log.
+ */
+export function clockFetch(clock: ServerClock, base: typeof fetch = fetch, timeoutMs = 15_000): typeof fetch {
   return async (input, init) => {
-    const res = await base(input, init)
+    const timeout = AbortSignal.timeout(timeoutMs)
+    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
+    const res = await base(input, { ...init, signal })
     clock.observe(res.headers.get('date'))
     return res
   }
