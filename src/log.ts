@@ -8,8 +8,28 @@ export function log(scope: string, msg: string, extra?: Record<string, unknown>)
 }
 
 export function logError(scope: string, msg: string, err?: unknown): void {
-  const detail = err instanceof Error ? err.message : err === undefined ? '' : String(err)
+  const detail = errorDetail(err)
   process.stderr.write(`${new Date().toISOString()} [${scope}] ERROR ${msg}${detail ? ': ' + detail : ''}\n`)
+}
+
+/**
+ * Los errores de Supabase (PostgrestError, AuthError, ...) no son instancias
+ * de Error: son objetos planos { message, code, details, hint }. `String(err)`
+ * sobre esos da "[object Object]", que es lo que se veía en el journal.
+ */
+function errorDetail(err: unknown): string {
+  if (err === undefined) return ''
+  if (err instanceof Error) return err.message
+  if (typeof err === 'object' && err !== null && 'message' in err && typeof (err as { message: unknown }).message === 'string') {
+    const message = (err as { message: string }).message
+    const code = (err as { code?: unknown }).code
+    return typeof code === 'string' ? `${message} (${code})` : message
+  }
+  try {
+    return JSON.stringify(err)
+  } catch {
+    return String(err)
+  }
 }
 
 function formatExtra(extra?: Record<string, unknown>): string {

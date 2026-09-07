@@ -60,6 +60,17 @@ export class PrinterCache {
     if (this.channel) await this.client.removeChannel(this.channel)
     this.channel = null
   }
+
+  /** Estado actual del canal, para que index.ts decida si hace falta resuscribir. */
+  state(): string {
+    return this.channel?.state ?? 'closed'
+  }
+
+  /** Tira el canal viejo y crea uno nuevo con el mismo callback. */
+  async resubscribe(onChange: () => void): Promise<void> {
+    await this.unsubscribe()
+    this.subscribe(onChange)
+  }
 }
 
 /** Mismo conjunto de impresoras y mismo endpoint en cada una. */
