@@ -20,10 +20,13 @@ Se suscribe a los INSERT de `print_jobs` por Realtime como un timbre, y cada
 60 segundos consulta igualmente por si algún evento se perdió. Por cada
 trabajo: lo reclama (`claimed`), lee el `payload`, abre un socket a la
 impresora, escribe, cierra, y marca `delivered`. Si la impresora no responde,
-lo suelta (`queued`) y espera 5 s, 15 s, 45 s, 2 min y luego 5 min cada vez;
-al décimo fallo, `failed` (unos 35 minutos). Esa espera es de la impresora, no
-del trabajo: frena también a los que reofrece el poll de 60 s. Un trabajo
-reclamado por una Pi que murió a medias se reofrece solo a los 2 minutos.
+lo suelta (`queued`), se lo guarda y lo reintenta él mismo tras 5 s, 15 s,
+45 s y luego 60 s cada vez; al décimo fallo, `failed` (unos 8 minutos). Esa
+espera es de la impresora, no del trabajo: frena también a los que reofrece
+el poll de 60 s. Y se corta antes de tiempo: el heartbeat sondea cada
+impresora cada 30 s y, en cuanto vuelve a responder, despierta al worker y el
+ticket sale al momento. Un trabajo reclamado por una Pi que murió a medias
+se reofrece solo a los 2 minutos.
 
 Guarda en SQLite local qué trabajos ya salieron por papel, para que un corte
 de red entre imprimir y confirmar no acabe en dos comandas. Cada 30 s dice

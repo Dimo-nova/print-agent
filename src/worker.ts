@@ -93,9 +93,10 @@ export class PrinterWorker {
       while (!this.stopped) {
         // El backoff se respeta ANTES de coger el siguiente trabajo, no
         // después del anterior: así frena también al job que el poll de 60 s
-        // reofrece. Dormir después solo retrasaba el bucle, y el reoferto
-        // entraba por una cola vacía quemando el intento siguiente al
-        // instante: cinco intentos se agotaban en cuatro minutos.
+        // reofrece (que aquí se deduplica contra el que ya espera en la cola
+        // tras un release). Dormir después solo retrasaba el bucle, y el
+        // reoferto entraba por una cola vacía quemando el intento siguiente
+        // al instante: cinco intentos se agotaban en cuatro minutos.
         const wait = this.pausedUntil - Date.now()
         if (wait > 0) await this.sleep(wait)
         if (this.stopped) break
@@ -163,6 +164,14 @@ export class PrinterWorker {
         this.recordTransition(job.id, 'release', released)
         const pause = backoffFor(attempt)
         this.pausedUntil = Date.now() + pause
+        // El job se queda en la cola local: el reintento lo hace este worker
+        // al acabar el backoff (o antes, si el probe del heartbeat despierta),
+        // no el poll de 60 s. Sin esto, wake() no tenía nada que reintentar
+        // y la impresora recuperada esperaba igualmente al siguiente poll
+        // (medido en campo 2026-09-07: 40 s con la impresora ya viva). Solo
+        // si el servidor aceptó el release: el job vuelve a ser `queued` y el
+        // CAS del claim debe verlo así. Si lo rechazó, que lo reofrezca el poll.
+        if (released) this.queue.set(job.id, { ...job, status: 'queued', attempts: attempt, claimed_at: null })
         log(scope, 'socket error, released', { ...tag, attempt, error: message, backoffMs: pause })
         return pause
       }
