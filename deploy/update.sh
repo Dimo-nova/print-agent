@@ -4,6 +4,9 @@ set -euo pipefail
 APP_DIR=/opt/print-agent
 APP_USER=printagent
 cd "$APP_DIR"
+# `npm prune --omit=dev` reescribe package-lock.json y el pull siguiente se
+# negaba a pisarlo. El lockfile bueno es el del repo: se descarta el local.
+sudo -u "$APP_USER" git checkout -- package-lock.json
 sudo -u "$APP_USER" git pull --ff-only
 sudo -u "$APP_USER" npm ci --no-audit --no-fund
 sudo -u "$APP_USER" npm run build
