@@ -81,7 +81,7 @@ describe('transiciones', () => {
     pg.onRequest(() => ({ body: [{ id: 'j1' }] }))
     expect(await markDelivered(client, 'j1', clock)).toBe(true)
     const req = pg.requests[0]!
-    expect(req.body).toMatchObject({ status: 'delivered' })
+    expect(req.body).toMatchObject({ status: 'delivered', error: null })
     expect(typeof (req.body as { delivered_at: string }).delivered_at).toBe('string')
     expect(req.query.get('status')).toBe('eq.claimed')
   })

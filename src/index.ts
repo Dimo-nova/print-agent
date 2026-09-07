@@ -10,6 +10,7 @@ import { PrinterWorker } from './worker.js'
 import { fetchClaimable, release, type ClaimableJob } from './queue.js'
 import { startHeartbeat } from './heartbeat.js'
 import { log, logError } from './log.js'
+import { shouldResubscribe } from './realtime-health.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../package.json') as { version: string }
@@ -56,7 +57,49 @@ async function main(): Promise<void> {
     }
   }
   syncWorkers()
-  printers.subscribe(() => { syncWorkers(); void poll('printers changed') })
+  const onPrintersChange = (): void => { syncWorkers(); void poll('printers changed') }
+  printers.subscribe(onPrintersChange)
+
+  function subscribeJobs(): RealtimeChannel {
+    return client
+      .channel(`print_jobs:${restaurantId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'print_jobs', filter: `restaurant_id=eq.${restaurantId}` },
+        // Timbre. El payload viene en el evento y se ignora a propósito: se lee tras el claim.
+        () => void poll('realtime'),
+      )
+      .subscribe(status => log('main', 'print_jobs channel', { status }))
+  }
+  let jobsChannel: RealtimeChannel = subscribeJobs()
+
+  // Corte de red de 2026-09-07: tras ~4 min sin conexion el canal se quedaba
+  // en CHANNEL_ERROR para siempre (supabase-js no lo reintenta el solo mas
+  // alla de cierto punto) y solo el poll de 60 s traia los jobs. ensureRealtime
+  // se llama tras cada fetchClaimable exitoso (o sea: sabemos que la red va
+  // bien) y recrea cualquier canal que no este joined/joining, como mucho una
+  // vez por minuto por canal para no perseguir un socket que no levanta.
+  const lastResubscribe = { jobs: -Infinity, printers: -Infinity }
+  async function ensureRealtime(): Promise<void> {
+    if (!client.realtime.isConnected()) {
+      client.realtime.connect()
+      log('main', 'realtime reconnecting')
+    }
+    const now = performance.now()
+    const jobsState = jobsChannel.state
+    if (shouldResubscribe(jobsState, lastResubscribe.jobs, now)) {
+      lastResubscribe.jobs = now
+      await client.removeChannel(jobsChannel)
+      jobsChannel = subscribeJobs()
+      log('main', 'print_jobs channel resubscribed', { was: jobsState })
+    }
+    const printersState = printers.state()
+    if (shouldResubscribe(printersState, lastResubscribe.printers, now)) {
+      lastResubscribe.printers = now
+      await printers.resubscribe(onPrintersChange)
+      log('main', 'printers channel resubscribed', { was: printersState })
+    }
+  }
 
   let polling = false
   let pollAgain = false
@@ -81,6 +124,7 @@ async function main(): Promise<void> {
         pollAgain = false
         const jobs = await fetchClaimable(client, restaurantId, clock, cfg.staleClaimMs)
         lastPollOk = performance.now()
+        await ensureRealtime().catch(err => logError('poll', 'ensureRealtime failed', err))
         if (jobs.length > 0) log('poll', 'claimable', { reason, n: jobs.length })
         for (const job of jobs) await dispatch(job)
       } while (pollAgain)
@@ -105,16 +149,6 @@ async function main(): Promise<void> {
     // cada 1000 huérfanos, que es un precio aceptable por no crecer sin fin.
     if (skippedNoPrinter.size > 1000) skippedNoPrinter.clear()
   }
-
-  const jobsChannel: RealtimeChannel = client
-    .channel(`print_jobs:${restaurantId}`)
-    .on(
-      'postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'print_jobs', filter: `restaurant_id=eq.${restaurantId}` },
-      // Timbre. El payload viene en el evento y se ignora a propósito: se lee tras el claim.
-      () => void poll('realtime'),
-    )
-    .subscribe(status => log('main', 'print_jobs channel', { status }))
 
   await poll('startup')
   const pollTimer = setInterval(() => void poll('interval'), cfg.pollIntervalMs)

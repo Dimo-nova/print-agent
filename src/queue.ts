@@ -66,7 +66,9 @@ export async function fetchPayload(client: SupabaseClient, jobId: string): Promi
 }
 
 export function markDelivered(client: SupabaseClient, jobId: string, clock: ServerClock): Promise<boolean> {
-  return transition(client, jobId, 'delivered', { status: 'delivered', delivered_at: clock.now().toISOString() })
+  // Limpia el error de un intento anterior: si no, un job que fallo un par de
+  // veces y luego imprimio se queda mostrando el ultimo fallo como si siguiera activo.
+  return transition(client, jobId, 'delivered', { status: 'delivered', delivered_at: clock.now().toISOString(), error: null })
 }
 
 /** Socket falló pero quedan intentos: de vuelta a la cola con el motivo. */
@@ -82,7 +84,7 @@ async function transition(
   client: SupabaseClient,
   jobId: string,
   op: string,
-  patch: Record<string, string>,
+  patch: Record<string, string | null>,
 ): Promise<boolean> {
   const { data, error } = await client
     .from('print_jobs')
