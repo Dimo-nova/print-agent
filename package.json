@@ -1,6 +1,6 @@
 {
   "name": "print-agent",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Dimonova print agent: Raspberry Pi bridge between print_jobs and ESC/POS printers",
   "type": "module",

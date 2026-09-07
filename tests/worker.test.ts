@@ -18,6 +18,19 @@ const sleep = async (ms: number) => { slept.push(ms) }
 /** El backoff se duerme por lo que le queda, no por el escalon exacto: se
  * compara en segundos para que unos milisegundos de proceso no rompan el test. */
 const sleptSeconds = () => slept.map(ms => Math.round(ms / 1000))
+/**
+ * Un sleep que no vuelve hasta que el test lo suelta. Hace falta desde que el
+ * worker reintenta él mismo el job liberado: con el sleep instantáneo de
+ * arriba recorrería toda la escalera de backoff dentro de un `drain()`.
+ */
+function gatedSleep() {
+  const gates: Array<() => void> = []
+  return {
+    sleep: (ms: number) => { slept.push(ms); return new Promise<void>(resolve => { gates.push(resolve) }) },
+    release: () => gates.shift()?.(),
+    releaseAll: () => { while (gates.length) gates.shift()!() },
+  }
+}
 const payload = Buffer.from([0x1b, 0x40, 0x48, 0x49, 0x0a]).toString('base64')
 
 beforeEach(async () => {
@@ -71,17 +84,48 @@ describe('PrinterWorker', () => {
     expect(patches()).toHaveLength(1)
   })
 
-  it('impresora inaccesible con intentos restantes: release con error y backoff', async () => {
+  it('impresora inaccesible con intentos restantes: release con error, backoff y reintento propio', async () => {
+    pg.onRequest(happyHandler)
+    await fake.close()
+    const gate = gatedSleep()
+    const w = new PrinterWorker(printer(fake.port), { client, clock, ledger, socketTimeoutMs: 1_000, staleClaimMs: 120_000, sleep: gate.sleep })
+    w.enqueue(job(0))
+    await waitFor(() => slept.length === 1)
+    let p = patches()
+    expect(p.map(x => x.status)).toEqual(['claimed', 'queued'])
+    expect(String(p[1]!.error)).toMatch(/ECONNREFUSED/)
+    expect(sleptSeconds()).toEqual([5])
+    expect(ledger.wasPrinted('j1')).toBe(false)
+
+    // Sin que nadie reofrezca el job, el worker lo reintenta solo al acabar
+    // el backoff: segundo claim con attempts=2 y el siguiente escalón.
+    gate.release()
+    await waitFor(() => slept.length === 2)
+    p = patches()
+    expect(p.map(x => x.status)).toEqual(['claimed', 'queued', 'claimed', 'queued'])
+    expect(p[2]!.attempts).toBe(2)
+    expect(sleptSeconds()).toEqual([5, 15])
+    w.stop()
+    gate.releaseAll()
+    await w.drain()
+  })
+
+  it('recorre toda la escalera de backoff y acaba failed', async () => {
     pg.onRequest(happyHandler)
     await fake.close()
     const w = new PrinterWorker(printer(fake.port), { client, clock, ledger, socketTimeoutMs: 1_000, staleClaimMs: 120_000, sleep })
     w.enqueue(job(0))
     await w.drain()
-    const p = patches()
-    expect(p.map(x => x.status)).toEqual(['claimed', 'queued'])
-    expect(String(p[1]!.error)).toMatch(/ECONNREFUSED/)
-    expect(sleptSeconds()).toEqual([5])
-    expect(ledger.wasPrinted('j1')).toBe(false)
+    const statuses = patches().map(x => x.status)
+    expect(statuses).toHaveLength(20)
+    expect(statuses.slice(0, 18)).toEqual(Array.from({ length: 9 }, () => ['claimed', 'queued']).flat())
+    expect(statuses.slice(18)).toEqual(['claimed', 'failed'])
+    expect(patches()[18]!.attempts).toBe(10)
+    // Nueve escalones entre intentos y uno más al salir del bucle con la
+    // cola ya vacía (el último release dejó pausedUntil en el futuro).
+    expect(sleptSeconds()).toEqual([5, 15, 45, 60, 60, 60, 60, 60, 60, 60])
+    // Tras `failed` no se vuelve a encolar: la cola queda vacía.
+    expect(fake.connections).toBe(0)
   })
 
   it('decimo intento fallido: failed', async () => {
@@ -104,15 +148,22 @@ describe('PrinterWorker', () => {
     // se comprueba es que se pidió dormir el escalón antes de reclamar.
     pg.onRequest(happyHandler)
     await fake.close()
-    const w = new PrinterWorker(printer(fake.port), { client, clock, ledger, socketTimeoutMs: 1_000, staleClaimMs: 120_000, sleep })
+    const gate = gatedSleep()
+    const w = new PrinterWorker(printer(fake.port), { client, clock, ledger, socketTimeoutMs: 1_000, staleClaimMs: 120_000, sleep: gate.sleep })
     w.enqueue(job(0))
-    await w.drain()
+    await waitFor(() => slept.length === 1)
     expect(sleptSeconds()).toEqual([5])
+    // El poll reofrece el mismo job mientras el worker duerme: se deduplica
+    // contra el que ya espera en la cola. Al soltar el sueño hay UN claim
+    // más (attempt 2), no dos.
     w.enqueue(job(1))
-    await w.drain()
-    expect(slept.length).toBeGreaterThanOrEqual(1)
-    expect(sleptSeconds()[0]).toBe(5)
+    gate.release()
+    await waitFor(() => slept.length === 2)
+    expect(sleptSeconds()).toEqual([5, 15])
     expect(patches().filter(p => p.status === 'claimed')).toHaveLength(2)
+    w.stop()
+    gate.releaseAll()
+    await w.drain()
   })
 
   it('wake() cancela el backoff pendiente', async () => {
@@ -130,20 +181,48 @@ describe('PrinterWorker', () => {
     pg.onRequest(happyHandler)
     const port = fake.port
     await fake.close()
-    const w = new PrinterWorker(printer(port), { client, clock, ledger, socketTimeoutMs: 1_000, staleClaimMs: 120_000, sleep })
+    const gate = gatedSleep()
+    const w = new PrinterWorker(printer(port), { client, clock, ledger, socketTimeoutMs: 1_000, staleClaimMs: 120_000, sleep: gate.sleep })
     w.enqueue(job(0))
-    await w.drain()
+    await waitFor(() => slept.length === 1)
     expect(sleptSeconds()).toEqual([5])
-    const sleptBeforeWake = slept.length
 
     fake = await startFakePrinterOn(port)
     w.wake()
-    w.enqueue(job(1))
+    gate.release()
     await w.drain()
 
     await waitFor(() => fake.received.length === 1)
-    expect(slept.length).toBe(sleptBeforeWake)
+    // Nadie reofreció el job: lo reintentó el propio worker, sin dormir más.
+    expect(slept.length).toBe(1)
     expect(patches().filter(p => p.status === 'claimed')).toHaveLength(2)
+    expect(patches().at(-1)!.status).toBe('delivered')
+  })
+
+  it('wake() corta un sueño real: la impresora vuelve y el ticket sale sin esperar el escalón', async () => {
+    // Sin sleep inyectado: el worker duerme de verdad los 5 s del primer
+    // escalón. El probe del heartbeat (aquí, wake() a mano) tiene que
+    // cancelar ese temporizador y reintentar al instante, no a los 5 s. Es
+    // exactamente lo que en campo tardaba 40 s: el job ya no estaba en la
+    // cola local y wake() no tenía qué reintentar.
+    pg.onRequest(happyHandler)
+    const port = fake.port
+    await fake.close()
+    const w = new PrinterWorker(printer(port), { client, clock, ledger, socketTimeoutMs: 1_000, staleClaimMs: 120_000 })
+    w.enqueue(job(0))
+    // Se espera a que el worker haya armado la pausa, no a que el servidor
+    // haya respondido: entre ambas hay unos ms en los que wake() llegaría
+    // antes de `pausedUntil = ...` y el sueño de 5 s se armaría después.
+    await waitFor(() => (w as unknown as { pausedUntil: number }).pausedUntil > 0)
+    expect(patches()[1]!.status).toBe('queued')
+
+    fake = await startFakePrinterOn(port)
+    const wokeAt = Date.now()
+    w.wake()
+    await waitFor(() => fake.received.length === 1, 2_000)
+    expect(Date.now() - wokeAt).toBeLessThan(2_000)
+    expect(patches().map(p => p.status)).toEqual(['claimed', 'queued', 'claimed', 'delivered'])
+    await w.drain()
   })
 
   it('el mismo id encolado dos veces se procesa una', async () => {

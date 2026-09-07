@@ -172,7 +172,7 @@ Proceso de un job:
 2. `ledger.wasPrinted(id)` → sí: `markDelivered`, log `[worker] already printed, delivered without reprint`, siguiente.
 3. `fetchPayload` → `sendBytes` (timeout `cfg.socketTimeoutMs`).
 4. Éxito: `ledger.markPrinted` → `markDelivered` → log. Reset del backoff de la impresora.
-5. Fallo de socket: si `isExhausted(attempt)` → `markFailed(error)`; si no → `release(error)` y la impresora queda en backoff hasta `Date.now() + backoffFor(attempt)`, que se respeta al principio del bucle (también para un job recién reofrecido por el poll).
+5. Fallo de socket: si `isExhausted(attempt)` → `markFailed(error)`; si no → `release(error)`, el job **se queda en la cola local** (con `status: 'queued'` y los `attempts` ya incrementados, para que el CAS del siguiente claim vea lo mismo que el servidor) y la impresora queda en backoff hasta `Date.now() + backoffFor(attempt)`, que se respeta al principio del bucle. El reintento lo hace el propio worker al acabar la pausa, o antes si `wake()` la corta; el poll de 60 s solo lo reofrece si el `release` fue rechazado (entonces no se guarda). Antes (≤ 0.1.2) el job salía de la cola al liberarse y `wake()` no tenía nada que reintentar: en campo el ticket esperaba al poll aunque la impresora llevase 30 s viva.
 6. Fallo de red con Supabase en cualquier paso: log, dejar el job (el `poll()` lo reofrecerá), dormir 10 s.
 
 La cola en memoria es un `Map<jobId, ClaimableJob>` procesado en orden de inserción; `enqueue` de un id ya presente no hace nada.
