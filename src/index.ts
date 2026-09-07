@@ -82,6 +82,14 @@ async function main(): Promise<void> {
   const lastResubscribe = { jobs: -Infinity, printers: -Infinity }
   async function ensureRealtime(): Promise<void> {
     if (!client.realtime.isConnected()) {
+      // Trampa de realtime-js: `RealtimeClient.connect()` es un no-op si
+      // `isConnecting() || isDisconnecting() || isConnected()` es verdad, y
+      // tras un corte de red el socket puede quedarse pillado en uno de esos
+      // estados intermedios para siempre (nunca llega a `closed` del todo),
+      // así que un `connect()` a secas no hacía nada indefinidamente. Un
+      // `disconnect()` primero fuerza el socket a un estado limpio (ninguno
+      // de los tres) y entonces `connect()` sí abre uno nuevo de verdad.
+      await client.realtime.disconnect()
       client.realtime.connect()
       log('main', 'realtime reconnecting')
     }
@@ -167,6 +175,7 @@ async function main(): Promise<void> {
   const stopHeartbeat = startHeartbeat({
     client, agentId: agent.id, printers, clock, version,
     heartbeatMs: cfg.heartbeatMs, probeTimeoutMs: cfg.probeTimeoutMs,
+    onPrinterAlive: id => workers.get(id)?.wake(),
   })
   log('main', 'running', { restaurant: restaurantId, pollMs: cfg.pollIntervalMs, heartbeatMs: cfg.heartbeatMs })
 

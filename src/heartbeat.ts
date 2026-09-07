@@ -12,6 +12,11 @@ export interface HeartbeatDeps {
   heartbeatMs: number
   probeTimeoutMs: number
   version: string
+  /**
+   * Despierta el worker de la impresora en cuanto el probe la ve responder de
+   * nuevo, para no esperar el resto de su backoff (hasta 60 s por escalón).
+   */
+  onPrinterAlive?: (printerId: string) => void
 }
 
 /**
@@ -22,6 +27,9 @@ export interface HeartbeatDeps {
 export function startHeartbeat(deps: HeartbeatDeps): () => void {
   let stopped = false
   let running = false
+  // Último estado conocido por impresora, para loguear solo la transición de
+  // no-alcanzable a alcanzable (no una línea por tick mientras va bien).
+  const reachable = new Map<string, boolean>()
 
   const tick = async () => {
     if (stopped || running) return
@@ -43,9 +51,13 @@ export function startHeartbeat(deps: HeartbeatDeps): () => void {
       for (const printer of deps.printers.all()) {
         const alive = await probe({ host: printer.host, port: printer.port }, deps.probeTimeoutMs)
         if (!alive) {
+          reachable.set(printer.id, false)
           log('heartbeat', 'printer unreachable', { printer: printer.name, host: `${printer.host}:${printer.port}` })
           continue
         }
+        if (reachable.get(printer.id) === false) log('heartbeat', 'printer reachable again', { printer: printer.name })
+        reachable.set(printer.id, true)
+        deps.onPrinterAlive?.(printer.id)
         try {
           const { error } = await deps.client.from('printers').update({ last_seen_at: now }).eq('id', printer.id).select('id')
           if (error) throw error
