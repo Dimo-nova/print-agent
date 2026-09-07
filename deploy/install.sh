@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Deja una Raspberry Pi recién flasheada (Raspberry Pi OS Lite 64-bit) con el
-# agente instalado como servicio. Idempotente: se puede volver a ejecutar.
+# agente instalado como servicio. Idempotente: se puede volver a ejecutar
+# (actualiza el codigo, conserva el .env).
 #
 #   sudo bash install.sh [URL-del-repo]
 #
@@ -36,15 +37,19 @@ fi
 
 echo "== código en ${APP_DIR}"
 if [ -d "$APP_DIR/.git" ]; then
-  git -C "$APP_DIR" pull --ff-only
+  # Ya instalado: el repo pertenece a printagent desde el primer run, y git
+  # rechaza operar como root sobre un repo ajeno (dubious ownership). Se tira
+  # del repo como su dueño, igual que hace update.sh.
+  sudo -u "$APP_USER" git -C "$APP_DIR" pull --ff-only
 else
   git clone "$REPO_URL" "$APP_DIR"
+  chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 fi
 cd "$APP_DIR"
-npm ci --no-audit --no-fund
-npm run build
-npm prune --omit=dev --no-audit --no-fund
-mkdir -p data
+sudo -u "$APP_USER" npm ci --no-audit --no-fund
+sudo -u "$APP_USER" npm run build
+sudo -u "$APP_USER" npm prune --omit=dev --no-audit --no-fund
+sudo -u "$APP_USER" mkdir -p data
 
 echo "== .env"
 if [ ! -f .env ]; then
@@ -62,7 +67,7 @@ EOF
   umask 022
 fi
 chmod 600 .env
-chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+chown "$APP_USER:$APP_USER" .env
 
 echo "== systemd"
 install -m 644 deploy/print-agent.service /etc/systemd/system/print-agent.service
